@@ -1,40 +1,49 @@
-# VideoDrop — personal video sharing
+# VideoDrop — شخصی برای اشتراک‌گذاری ویدئو
 
-A minimal Persian-language personal video upload/download site, designed for the VPS at `185.190.53.142`.
+وب‌سایت سبک فارسی برای آپلود ویدئو روی سرور شخصی و دادن لینک دانلود مستقیم.
 
-Features: password-protected admin panel, direct unauthenticated share links with 192-bit random IDs, upload progress, storage indicator, deletion, support for HTTP range/resumable downloads, 1.5 GiB disk safety reserve, no third-party database, streaming uploads without duplicate temporary file copies, automatic HTTPS with Caddy using `185-190-53-142.sslip.io`.
+- پنل مدیریت با رمز تصادفی
+- لینک عمومی با شناسه تصادفی مجزا برای هر فایل
+- آپلود با نمایش پیشرفت
+- دانلود با قابلیت ادامه (HTTP Range)
+- حذف ویدئوها از پنل
+- نمایش میزان فضای آزاد دیسک
+- نگهداری حداقل ۱.۵ گیگابایت فضای خالی
+- HTTPS خودکار با Caddy
 
-## Install (Ubuntu/Debian with Docker Engine + Docker Compose plugin already installed)
+## نصب مستقیم از GitHub روی Ubuntu / Debian
 
-Copy and unzip the archive on the server, then:
+سرور: `185.190.53.142`
+
+نیازمندی‌ها: Docker Engine، افزونه Docker Compose، openssl و curl. پورت‌های TCP 80 و 443 باید آزاد باشند و از اینترنت قابل دسترسی باشند.
+
+در ترمینال سرور با root اجرا کنید:
 
 ```bash
-cd /root/video_share_site
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/aliiitavazoeiii-afk/uploader/main/install.sh -o /root/video-share-install.sh && bash /root/video-share-install.sh
 ```
 
-Your admin password is shown at the first installation. Save it. It is also in `/opt/video-share/.env` (root-only). Open:
+آدرس بعد از نصب موفق و دریافت گواهی HTTPS:
 
 https://185-190-53-142.sslip.io
 
-Ports 80 and 443 must be free and allowed by host/provider firewalls. The script will **not** stop or modify other services. If you use Caddy or Nginx already, contact us to integrate into the existing reverse proxy rather than running a second one on ports 80/443.
+رمز مدیریت در اولین نصب روی ترمینال نمایش داده می‌شود و در `/opt/video-share/.env` ذخیره می‌گردد.
 
-Uploads are stored in `/opt/video-share/data/videos`, metadata in `/opt/video-share/data/index.json` and are persistent across container recreation. Removing files from the dashboard deletes the video and invalidates its link. To keep files private, share links only with intended recipients; recipients can forward them.
-
-To see the service status:
+## وضعیت و لاگ
 
 ```bash
 cd /opt/video-share && docker compose ps && docker compose logs --tail=50
 ```
 
-## Security
+داده‌ها در `/opt/video-share/data` نگهداری می‌شوند. فایل ویدئو در `data/videos` و فهرست در `data/index.json` است. حذف ویدئو از سایت فایل را نیز حذف می‌کند. با حذف کانتینر فایل‌ها از بین نمی‌روند؛ اما حذف پوشه `data` باعث از دست رفتن اطلاعات می‌شود.
 
-- HTTPS certificates use Let's Encrypt through Caddy; the hostname is supplied by the external `sslip.io` DNS service (if available).
-- Admin login rate limiting, HttpOnly/Secure/SameSite cookie, basic same-origin check for browser requests.
-- Public downloads use random unguessable links, not password protection; anybody with a link can download.
-- Ensure backups if your videos are important. Disk capacity is *not* exactly 30GB usable: the OS and other services consume space, and the app reserves 1.5 GiB free.
-- No account or login for download recipients.
+## نکات مهم
 
-## No Docker yet?
+نصب‌کننده تلاش نمی‌کند سرویس‌های دیگر سرور را متوقف کند. در صورت اشغال بودن ۸۰ یا ۴۴۳، نصب متوقف می‌شود و باید سایت را به reverse proxy موجود متصل کنید.
 
-Install Docker Engine and the Compose plugin from the official documentation at https://docs.docker.com/engine/install/ before running the installer. The installer intentionally does not change the VPS system packages or existing services.
+رمز فقط برای مدیر لازم است؛ **هر کسی لینک یک فایل را داشته باشد می‌تواند آن را دانلود و بازنشر کند**. فایل‌های خصوصی را فقط با افراد مورداعتماد به اشتراک بگذارید.
+
+اگر Docker یا Compose موجود نیست، مطابق مستندات رسمی Docker نصب کنید: https://docs.docker.com/engine/install/
+
+برای اجرای مستقیم از سورس بدون آرشیو تعبیه‌شده، پس از clone کردن مخزن اسکریپت `scripts/install-from-source.sh` نیز وجود دارد. 
+
