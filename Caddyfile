@@ -1,6 +1,9 @@
 {
     servers {
-        protocols h1 h2
+        protocols h1
+        timeouts {
+            read_body_idle 5m
+        }
     }
 }
 {$PUBLIC_HOST} {
