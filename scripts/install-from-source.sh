@@ -62,6 +62,12 @@ if ! docker compose ps --quiet 2>/dev/null | grep -q .; then
     done
   fi
 fi
+echo 'Validating Caddy configuration before deployment...'
+if ! docker compose run --rm --no-deps -T web caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
+  echo 'Invalid Caddy configuration. Existing running containers were not restarted.' >&2
+  echo 'Application code backup can be found in /opt/video-share/code-backups.' >&2
+  exit 1
+fi
 echo 'Building and starting VideoDrop (only the video-share stack)...'
 docker compose up -d --build
 printf '\nSITE: https://%s\n' "$HOST"
