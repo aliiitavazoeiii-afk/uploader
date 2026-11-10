@@ -15,6 +15,10 @@ const SESSION_SECRET = process.env.SESSION_SECRET || '';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 const MIN_FREE_BYTES = Number(process.env.MIN_FREE_BYTES || 1610612736); // reserve 1.5 GiB for OS
 const MAX_FILE_BYTES = 30 * 1024 ** 3;
+const CHUNK_SIZE = 8 * 1024 * 1024;
+const MAX_ACTIVE_UPLOADS = 3;
+const MAX_PARALLEL_CHUNKS = 6;
+const UPLOAD_IDLE_MS = 6 * 60 * 60 * 1000;
 const SESSION_LIFE_SECONDS = 7 * 24 * 60 * 60;
 const APP_HTML = fs.readFileSync(path.join(__dirname, 'index.html'));
 const ALLOWED_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.wmv', '.mpeg', '.mpg', '.3gp', '.ts']);
@@ -32,6 +36,7 @@ if (!fs.existsSync(INDEX_PATH)) fs.writeFileSync(INDEX_PATH, '{"files":[]}\n', {
 let catalog = JSON.parse(fs.readFileSync(INDEX_PATH, 'utf8'));
 if (!Array.isArray(catalog.files)) throw new Error('Invalid file index');
 let reservations = new Map();
+const activeUploads = new Map();
 let authFailures = new Map();
 
 function send(res, status, data, headers = {}) {
@@ -171,6 +176,110 @@ async function upload(req, res) {
   } finally { reservations.delete(id); }
 }
 
+// Parallel chunk uploads: each chunk is written directly to its offset on disk.
+// Existing /api/upload remains supported for older browser sessions.
+function cleanupMultipart(record) {
+  activeUploads.delete(record.id);
+  reservations.delete(record.id);
+  try { fs.rmSync(record.temporary, { force: true }); } catch {}
+}
+async function initMultipart(req, res) {
+  let input;
+  try { input = await readJson(req, 2048); } catch { return send(res, 400, { error: 'اطلاعات فایل نامعتبر است' }); }
+  const name = cleanName(input.name);
+  const size = input.size;
+  if (!name || !ALLOWED_EXTENSIONS.has(path.extname(name).toLowerCase())) return send(res, 400, { error: 'فقط فایل ویدئویی مجاز است' });
+  if (!Number.isSafeInteger(size) || size < 1 || size > MAX_FILE_BYTES) return send(res, 413, { error: 'حجم فایل نامعتبر است' });
+  if (activeUploads.size >= MAX_ACTIVE_UPLOADS) return send(res, 429, { error: 'تعداد آپلودهای هم‌زمان زیاد است' });
+  const reserved = [...reservations.values()].reduce((sum, v) => sum + v, 0);
+  if (diskInfo().diskFree - reserved - size < MIN_FREE_BYTES) return send(res, 507, { error: 'فضای کافی روی سرور باقی نمانده است' });
+  const id = crypto.randomBytes(24).toString('hex');
+  const temporary = path.join(VIDEO_DIR, id + '.part');
+  let fd;
+  try {
+    fd = fs.openSync(temporary, 'wx+', 0o600);
+    fs.ftruncateSync(fd, size); // sparse file; only transferred bytes occupy disk blocks
+  } catch (err) {
+    try { if (fd !== undefined) fs.closeSync(fd); } catch {}
+    try { fs.rmSync(temporary, { force: true }); } catch {}
+    return send(res, 507, { error: 'امکان رزرو فایل روی دیسک وجود ندارد' });
+  }
+  fs.closeSync(fd);
+  const record = { id, name, size, temporary, chunks: Math.ceil(size / CHUNK_SIZE),
+    received: new Set(), inflight: new Set(), lastActivity: Date.now(), cancelled: false, completing: false };
+  activeUploads.set(id, record);
+  reservations.set(id, size);
+  return send(res, 201, { id, chunkSize: CHUNK_SIZE, chunks: record.chunks });
+}
+async function receiveChunk(req, res, id, part) {
+  const record = activeUploads.get(id);
+  if (!record || record.cancelled) return send(res, 404, { error: 'آپلود پیدا نشد' });
+  const index = Number(part);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= record.chunks) return send(res, 400, { error: 'شماره بخش نامعتبر است' });
+  if (record.completing) return send(res, 409, { error: 'آپلود در حال تکمیل است' });
+  if (record.received.has(index)) return send(res, 200, { ok: true, alreadyReceived: true });
+  if (record.inflight.has(index)) return send(res, 409, { error: 'این بخش در حال دریافت است' });
+  if (record.inflight.size >= MAX_PARALLEL_CHUNKS) return send(res, 429, { error: 'اتصال‌های هم‌زمان بیش از حد است' });
+  const expected = Math.min(CHUNK_SIZE, record.size - index * CHUNK_SIZE);
+  if (Number(req.headers['content-length']) !== expected) return send(res, 400, { error: 'حجم بخش با انتظار سرور مطابقت ندارد' });
+  record.inflight.add(index);
+  record.lastActivity = Date.now();
+  try {
+    let received = 0;
+    req.on('data', piece => { received += piece.length; });
+    await pipeline(req, fs.createWriteStream(record.temporary, { flags: 'r+', start: index * CHUNK_SIZE, highWaterMark: 1024 * 1024 }));
+    if (received !== expected) throw new Error('CHUNK_INCOMPLETE');
+    if (!record.cancelled) record.received.add(index);
+    if (!res.destroyed && !res.writableEnded) return send(res, record.cancelled ? 410 : 200, { ok: !record.cancelled });
+  } catch (err) {
+    console.error('chunk error', id, index, err.code || err.message);
+    if (!res.destroyed && !res.writableEnded) send(res, 500, { error: 'ارسال بخش ناموفق بود؛ دوباره تلاش کن' });
+  } finally {
+    record.inflight.delete(index);
+    record.lastActivity = Date.now();
+    if (record.cancelled && record.inflight.size === 0) cleanupMultipart(record);
+  }
+}
+function finishMultipart(req, res, id) {
+  const record = activeUploads.get(id);
+  if (!record || record.cancelled) return send(res, 404, { error: 'آپلود پیدا نشد' });
+  if (record.inflight.size || record.received.size !== record.chunks) return send(res, 409, { error: 'تمام بخش‌های فایل دریافت نشده‌اند' });
+  if (record.completing) return send(res, 409, { error: 'آپلود در حال تکمیل است' });
+  record.completing = true;
+  const destination = path.join(VIDEO_DIR, id + '.bin');
+  const entry = { id, name: record.name, size: record.size, created: new Date().toISOString() };
+  try {
+    fs.renameSync(record.temporary, destination);
+    catalog.files.push(entry);
+    try { saveIndex(); } catch (err) { catalog.files.pop(); throw err; }
+    activeUploads.delete(id);
+    reservations.delete(id);
+    return send(res, 201, { ok: true, file: { ...entry, url: publicUrl(entry) } });
+  } catch (err) {
+    console.error('finalize error', err.code || err.message);
+    try { fs.rmSync(destination, { force: true }); } catch {}
+    cleanupMultipart(record);
+    return send(res, 500, { error: 'ثبت فایل ناموفق بود' });
+  }
+}
+function cancelMultipart(req, res, id) {
+  const record = activeUploads.get(id);
+  if (!record) return send(res, 200, { ok: true });
+  if (record.completing) return send(res, 409, { error: 'آپلود در حال تکمیل است' });
+  record.cancelled = true;
+  if (!record.inflight.size) cleanupMultipart(record);
+  return send(res, 200, { ok: true });
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const record of activeUploads.values()) {
+    if (now - record.lastActivity > UPLOAD_IDLE_MS && !record.completing) {
+      record.cancelled = true;
+      if (!record.inflight.size) cleanupMultipart(record);
+    }
+  }
+}, 10 * 60 * 1000).unref();
+
 async function handler(req, res) {
   try {
     const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -202,6 +311,12 @@ async function handler(req, res) {
       if (req.method === 'GET' && pathname === '/api/state') return send(res, 200, fileStats());
       if (req.method === 'POST' && pathname === '/api/logout') return send(res, 200, { ok: true }, { 'Set-Cookie': 'vd_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
       if (req.method === 'POST' && pathname === '/api/upload') return upload(req, res);
+      if (req.method === 'POST' && pathname === '/api/uploads') return initMultipart(req, res);
+      const chunkMatch = /^\/api\/uploads\/([a-f0-9]{48})\/chunks\/(\d+)$/.exec(pathname);
+      if (req.method === 'POST' && chunkMatch) return receiveChunk(req, res, chunkMatch[1], chunkMatch[2]);
+      const uploadMatch = /^\/api\/uploads\/([a-f0-9]{48})$/.exec(pathname);
+      if (uploadMatch && req.method === 'POST') return finishMultipart(req, res, uploadMatch[1]);
+      if (uploadMatch && req.method === 'DELETE') return cancelMultipart(req, res, uploadMatch[1]);
       const m = /^\/api\/files\/([a-f0-9]{48})$/.exec(pathname);
       if (req.method === 'DELETE' && m) {
         const i = catalog.files.findIndex(f => f.id === m[1]);
