@@ -47,7 +47,7 @@ a{color:inherit}button,input{font:inherit}button{cursor:pointer}button:disabled{
     <div class="metric"><span class="metric-label">فضای خالی دیسک</span><strong id="storage-free">—</strong><span class="small" id="space-caption">با حفظ فضای امن برای سیستم</span><div class="storage-progress"><div id="disk-bar"></div></div></div>
   </section>
   <section class="panel upload-panel"><div id="upload-zone" class="upload-zone"><div class="upload-icon">⇧</div><h3>ویدئوت رو همین‌جا بنداز</h3><p>فایل رو بکش و رها کن یا از دستگاهت انتخاب کن.<br>فرمت‌های MP4، MOV، MKV و سایر ویدئوهای رایج پشتیبانی می‌شن.</p><button class="primary" id="pick-file" type="button">انتخاب ویدئو</button><input id="file-input" type="file" accept="video/*,.mkv,.avi,.wmv,.ts,.m4v,.mpeg,.mpg"></div>
-    <div class="upload-status" id="upload-status" aria-live="polite"><div class="upload-head"><span id="upload-name">در حال آپلود...</span><strong id="upload-percent">۰٪</strong></div><div class="progress-track"><div class="progress-fill" id="upload-bar"></div></div><div id="upload-speed" style="font-size:12px;color:#9eaed4;margin-top:10px;direction:ltr;text-align:right"></div><div id="upload-message" class="error"></div></div>
+    <div class="upload-status" id="upload-status" aria-live="polite"><div class="upload-head"><span id="upload-name">در حال آپلود...</span><strong id="upload-percent">۰٪</strong></div><div class="progress-track"><div class="progress-fill" id="upload-bar"></div></div><div id="upload-speed" style="font-size:12px;color:#9eaed4;margin-top:10px;direction:ltr;text-align:right"></div><div id="upload-details" style="font-size:12px;color:#afbfdd;margin-top:8px;direction:ltr;text-align:right"></div><div id="upload-message" class="error"></div></div>
     <div class="upload-line"><span>فایل‌ها روی سرور خودت ذخیره می‌شن و ماندگار می‌مونن تا حذفشون کنی.</span><span>برای آپلود، صفحه رو باز نگه دار.</span></div>
   </section>
   <section class="panel files-panel"><div class="section-header"><div><h2>فایل‌های من</h2><p>برای اشتراک‌گذاری روی «کپی لینک» بزن.</p></div><button class="small-btn" id="refresh" type="button">↻ به‌روزرسانی</button></div><div class="file-list" id="file-list"><div class="empty">در حال بارگذاری…</div></div></section>
@@ -103,34 +103,43 @@ async function upload(file){
   if(!file.size){toast('فایل خالی قابل آپلود نیست');return;}
   busy=true;$('pick-file').disabled=true;$('upload-status').classList.add('visible');
   $('upload-name').textContent=file.name;$('upload-percent').textContent='۰٪';
-  $('upload-bar').style.width='0%';$('upload-speed').textContent='';$('upload-message').textContent='';
+  $('upload-bar').style.width='0%';$('upload-speed').textContent='';$('upload-details').textContent='';$('upload-message').textContent='';
   let id=null;
   const start=performance.now(), inFlight=new Map(), completed=new Set();
   let bytesFinished=0, nextIndex=0, failure=null;
   const activeXhrs=new Set();
   function progress(){
-    const sent=bytesFinished+[...inFlight.values()].reduce((a,b)=>a+b,0);
-    const percent=Math.min(100,Math.round(sent/file.size*100));
-    const seconds=Math.max((performance.now()-start)/1000,.1);
-    $('upload-percent').textContent=percent.toLocaleString('fa-IR')+'٪';
+    const sent=Math.min(file.size,bytesFinished+[...inFlight.values()].reduce((a,b)=>a+b,0));
+    const percent=Math.min(100,100*sent/file.size);
+    const seconds=Math.max((performance.now()-start)/1000,0.1);
+    $('upload-percent').textContent=percent.toLocaleString('fa-IR',{minimumFractionDigits:2,maximumFractionDigits:2})+'٪';
     $('upload-bar').style.width=percent+'%';
     $('upload-speed').textContent=(sent*8/seconds/1e6).toFixed(2)+' Mbps';
+    $('upload-details').textContent=fmt(sent)+' / '+fmt(file.size)+' ارسال شده';
   }
+  progress();
   function sendPart(uploadId,index,chunkSize){
     const from=index*chunkSize, to=Math.min(file.size,from+chunkSize);
     return new Promise((resolve,reject)=>{
       const xhr=new XMLHttpRequest();activeXhrs.add(xhr);
+      let idleTimer=null, stalled=false, lastLoaded=0;
+      const clearIdle=()=>{if(idleTimer!==null)clearTimeout(idleTimer);idleTimer=null;};
+      const resetIdle=()=>{clearIdle();idleTimer=setTimeout(()=>{stalled=true;xhr.abort();},90000);};
       xhr.open('POST','/api/uploads/'+uploadId+'/chunks/'+index);
-      xhr.upload.onprogress=e=>{if(e.lengthComputable){inFlight.set(index,e.loaded);progress();}};
+      xhr.upload.onprogress=e=>{
+        if(e.loaded>lastLoaded){
+          lastLoaded=e.loaded;inFlight.set(index,e.loaded);progress();resetIdle();
+        }
+      };
       xhr.onload=()=>{
-        activeXhrs.delete(xhr);
+        clearIdle();activeXhrs.delete(xhr);
         if(xhr.status===200){inFlight.delete(index);resolve(to-from);}
         else{let result={};try{result=JSON.parse(xhr.responseText);}catch{}
           reject(Object.assign(new Error(result.error||'خطای دریافت بخش'),{status:xhr.status}));}
       };
-      xhr.onerror=()=>{activeXhrs.delete(xhr);reject(new Error('ارتباط اینترنت قطع شد'));};
-      xhr.onabort=()=>{activeXhrs.delete(xhr);reject(new Error('ارتباط متوقف شد'));};
-      xhr.send(file.slice(from,to));
+      xhr.onerror=()=>{clearIdle();activeXhrs.delete(xhr);reject(new Error('ارتباط اینترنت قطع شد'));};
+      xhr.onabort=()=>{clearIdle();activeXhrs.delete(xhr);reject(new Error(stalled?'ارسال بخش متوقف شد؛ تلاش مجدد':'ارسال متوقف شد'));};
+      inFlight.set(index,0);resetIdle();xhr.send(file.slice(from,to));
     });
   }
   try{
@@ -149,15 +158,17 @@ async function upload(file){
             if(!completed.has(i)){completed.add(i);bytesFinished+=n;}
             inFlight.delete(i);progress();success=true;break;
           }catch(e){inFlight.delete(i);progress();
-            if(e.status && e.status<500 && e.status!==429){failure=e;break;}
+            if(e.status && e.status<500 && e.status!==429 && e.status!==409){failure=e;break;}
             if(attempt===2){failure=e;break;}
-            await new Promise(resolve=>setTimeout(resolve,700*(attempt+1)));
+            $('upload-message').textContent='اختلال موقت؛ تلاش مجدد '+(attempt+1)+'/۲';
+            await new Promise(resolve=>setTimeout(resolve,1200*(attempt+1)));
+            $('upload-message').textContent='';
           }
         }
         if(!success)return;
       }
     }
-    await Promise.all(Array.from({length:Math.min(4,chunks)},()=>worker()));
+    await Promise.all(Array.from({length:Math.min(3,chunks)},()=>worker()));
     if(failure)throw failure;
     $('upload-percent').textContent='در حال ثبت فایل...';
     await api('/api/uploads/'+id,{method:'POST'});
