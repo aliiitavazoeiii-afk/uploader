@@ -3,7 +3,12 @@ set -Eeuo pipefail
 if [ "$(id -u)" -ne 0 ]; then echo 'Please run as root: sudo bash install.sh'; exit 1; fi
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST=/opt/video-share
-HOST=185-190-53-142.sslip.io
+SITE_IP="${VIDEODROP_IP:-45.142.189.66}"
+if ! [[ "$SITE_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  echo "Invalid VIDEODROP_IP format: $SITE_IP" >&2
+  exit 1
+fi
+HOST="${VIDEODROP_HOST:-${SITE_IP//./-}.sslip.io}"
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   echo 'Docker Engine and Docker Compose plugin are required.'
   echo 'For Ubuntu/Debian, use the official Docker installation instructions:'
@@ -44,10 +49,16 @@ VARS
   echo '--------------------------------------------'
 else
   echo 'Existing .env preserved. Password was NOT changed.'
+  CURRENT_HOST="$(sed -n 's/^PUBLIC_HOST=//p' .env | head -n 1)"
+  if [ -n "$CURRENT_HOST" ] && [ "$CURRENT_HOST" != "$HOST" ]; then
+    echo "WARNING: Existing PUBLIC_HOST=$CURRENT_HOST does not match intended new host $HOST" >&2
+    echo 'The existing .env was preserved. Check host before proceeding.' >&2
+    exit 1
+  fi
 fi
 if command -v getent >/dev/null 2>&1; then
   RESOLVED="$(getent ahostsv4 "$HOST" | awk 'NR==1{print $1}' || true)"
-  if [ -n "$RESOLVED" ] && [ "$RESOLVED" != '185.190.53.142' ]; then
+  if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$SITE_IP" ]; then
     echo "Warning: DNS resolves $HOST to $RESOLVED, not the server IP." >&2
   fi
 fi
