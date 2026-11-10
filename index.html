@@ -168,7 +168,7 @@ async function upload(file){
         if(!success)return;
       }
     }
-    await Promise.all(Array.from({length:Math.min(3,chunks)},()=>worker()));
+    await Promise.all(Array.from({length:Math.min(1,chunks)},()=>worker()));
     if(failure)throw failure;
     $('upload-percent').textContent='در حال ثبت فایل...';
     await api('/api/uploads/'+id,{method:'POST'});
