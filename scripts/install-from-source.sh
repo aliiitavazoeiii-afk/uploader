@@ -14,6 +14,14 @@ fi
 if ! docker info >/dev/null 2>&1; then echo 'Docker service is not running. Start Docker first.'; exit 1; fi
 if [ "$SRC" != "$DEST" ]; then
   mkdir -p "$DEST"
+  if [ -f "$DEST/server.js" ]; then
+    CODE_BACKUP="$DEST/code-backups/$(date +%Y%m%d-%H%M%S)-$"
+    mkdir -p "$CODE_BACKUP"
+    for file in server.js index.html Dockerfile Caddyfile compose.yaml; do
+      if [ -f "$DEST/$file" ]; then cp -p "$DEST/$file" "$CODE_BACKUP/$file"; fi
+    done
+    echo "Previous application code backed up to $CODE_BACKUP"
+  fi
   cp "$SRC/server.js" "$SRC/index.html" "$SRC/Dockerfile" "$SRC/Caddyfile" "$SRC/compose.yaml" "$DEST/"
 fi
 cd "$DEST"
